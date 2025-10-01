@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(ros2_cpp_template)
+project(kaz_j25_ajr)
 
 # Default to C++14
 if(NOT CMAKE_CXX_STANDARD)
