@@ -2,15 +2,19 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>kaz_j25_ajr</name>
-  <version>0.0.0</version>
-  <description>Teszt</description>
-  <maintainer email="kazi.gabor01@gmail.com"></maintainer>
+  <version>0.1.0</version>
+  <description>Egyszerű autonóm porszívó ROS 2-ben Qt5 GUI-val.</description>
+  <maintainer email="kazi.gabor01@gmail.com">Kazi Gábor</maintainer>
   <license>GNU General Public License v3.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+
+  <build_depend>qtbase5-dev</build_depend>
+  <exec_depend>qtbase5-dev</exec_depend>
+  
   <exec_depend>ros2launch</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
