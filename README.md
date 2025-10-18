@@ -7,7 +7,7 @@ A package két node-ból áll:
 * A `/world_node` egy **Qt-alapú szimulációs környezetet** valósít meg, amely megjeleníti egy robotporszívó mozgását, a falakat, a koszt és a takarítás folyamatát.
 * A `/vacuum_node` egy **autonóm porszívó logikát** valósít meg, amely a ROS-topicokon keresztül kap információt a világról, és ennek alapján vezérli saját mozgását.
 
-A robot 10×10 m-es szobában mozog, port keres és felszívja azt. A világ szimulálja az érzékelést, a mozgást, és minden komponens ROS 2 Humble alatt futtatható.
+A robot 10×10 m-es szobában mozog, koszt keres és felszívja azt. A világ szimulálja az érzékelést, a mozgást, és minden komponens ROS 2 Humble alatt futtatható.
 
 ---
 
