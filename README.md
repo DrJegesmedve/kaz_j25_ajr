@@ -4,10 +4,10 @@ ROS 2 C++ package. [![Static Badge](https://img.shields.io/badge/ROS_2-Humble-34
 
 A package két node-ból áll:
 
-* A `/world_node` egy **Qt-alapú szimulációs környezetet** valósít meg, amely megjeleníti egy robotporszívó mozgását, a falakat, a koszt és a takarítás folyamatát.
-* A `/vacuum_node` egy **autonóm porszívó logikát** valósít meg, amely a ROS-topicokon keresztül kap információt a világról, és ennek alapján vezérli saját mozgását.
+* A `/world_node` egy **Qt-alapú szimulációs környezetet** valósít meg, amely megjeleníti egy robotporszívó mozgását, a falakat, az akadályokat, a koszt és a takarítás folyamatát.
+* A `/vacuum_node` egy **autonóm, akadályelkerülő porszívó logikát** valósít meg, amely a ROS-topicokon keresztül kap információt a világról, és ennek alapján vezérli saját mozgását.
 
-A robot 10×10 m-es szobában mozog, koszt keres és felszívja azt. A világ szimulálja az érzékelést, a mozgást, és minden komponens ROS 2 Humble alatt futtatható.
+A robot 10×10 m-es szobában mozog, koszt keres és felszívja azt. Továbbá kikerüli az esetleges akadályokat. A világ szimulálja az érzékelést, a mozgást, és minden komponens ROS 2 Humble alatt futtatható.
 
 ---
 
@@ -92,6 +92,12 @@ wall --> vac
 world --> done[ /done<br/>std_msgs/Bool]:::light
 done --> vac
 
+world --> obsnear[ /obstacle_nearby<br/>std_msgs/Bool]:::light
+obsnear --> vac
+
+world --> obscoll[ /obstacle_collision<br/>std_msgs/Bool]:::light
+obscoll --> vac
+
 classDef light fill:#34aec5,stroke:#152742,stroke-width:2px,color:#152742  
 classDef dark fill:#152742,stroke:#34aec5,stroke-width:2px,color:#34aec5
 classDef white fill:#ffffff,stroke:#152742,stroke-width:2px,color:#152742
@@ -105,16 +111,17 @@ classDef red fill:#ef4638,stroke:#152742,stroke-width:2px,color:#fff
 * **`world_node`**
 
   * Qt-based GUI simulation (10×10 m map)
-  * Randomly generated 30 dust spots
-  * Publishes robot pose, wall proximity, dust targets and completion status
-  * Visualizes sensing radius (green), cleaned areas (purple), sensed cells (yellow), and remaining dust (gray)
+  * Randomly generated dust spots
+  * Randomly generated obstacles (*Due to randomness, rarely a closed obstacle configuration may block the accessto a small region and the robot can't fulfill its reason of existence*)
+  * Publishes robot pose, wall proximity, dust targets, obstacle informations and completion status
+  * Visualizes sensing radius (green), cleaned areas (purple), sensed cells (yellow), and remaining dust (gray), and obstacles (blue)
 
 * **`vacuum_node`**
 
-  * Receives robot position and dust targets
+  * Receives robot position, wall and obstacle signals, and dust targets
   * Publishes movement commands (`/cmd_vel`)
-  * Avoids walls and navigates towards dust
-  * Moves randomly when no dust is known
+  * Avoids walls and obstacles while navigating autonomously toward dust
+  * Performs random exploration when no dust is known
 
 ---
 

@@ -1,11 +1,11 @@
 #include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/twist.hpp" // sebesség (linear.x, angular.z)
-#include "geometry_msgs/msg/pose2_d.hpp" // pozíció (x, y, theta)
-#include "geometry_msgs/msg/point.hpp" // célpont (x, y, z)
-#include "std_msgs/msg/bool.hpp" // Logikai üzenet (pl. fal érzékeléséhez)
+#include "geometry_msgs/msg/twist.hpp"
+#include "geometry_msgs/msg/pose2_d.hpp"
+#include "geometry_msgs/msg/point.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 #include <QApplication>
-#include <QPainter> // Qt GUI
+#include <QPainter>
 #include <QWidget>
 
 #include <vector>
@@ -14,253 +14,418 @@
 #include <set>
 #include <optional>
 #include <thread>
+#include <algorithm>
 
-enum class Cell { Empty, Dust, Cleaned, Sensed };
-// Cell állapotok: felfedezetlen, koszos, tisztított, érzékelt üres
+enum class Cell { Empty, Dust, Cleaned, Sensed, Obstacle }; // cella állapotok: üres, kosz, felszívott, érzékelt, akadály
 
 class World : public QWidget {
 public:
     World(rclcpp::Node::SharedPtr node_in) : node_(node_in), rand(std::random_device{}()) {
-        resize(520, 520); setWindowTitle("Porszívó szimuláció"); // Ablak inicializálás
+        resize(520, 520);
+        setWindowTitle("Porszívó szimuláció");
 
-        pose.x = 5.0; pose.y = 5.0; // középre
+        // Kezdő pozíció
+        pose.x = 5.0;
+        pose.y = 5.0;
         pose.theta = 0.0;
 
-        init_grid(); // üres rács
-        place_dust(); // véletlenszerű kosz (30)
+        init_grid(); // Rács inicializálás
+        place_obstacles(); // Akadályok elhelyezése
+        place_dust(); // Koszok elhelyezése
 
-        cmd_sub = node_->create_subscription<geometry_msgs::msg::Twist>( "/cmd_vel", 10, [this](geometry_msgs::msg::Twist::SharedPtr m){ cmd = *m; }); // A porszívó sebességparancsa (lineáris + szögsebesség)
-        pose_pub = node_->create_publisher<geometry_msgs::msg::Pose2D>("/pose", 10); //A porszívó aktuális pozíciója (x, y, szög)
-        target_pub = node_->create_publisher<geometry_msgs::msg::Point>("/target_dust", 10); // A porszívó által megcélzott kosz pozíciója (x, y, z=0)
-        wall_pub = node_->create_publisher<std_msgs::msg::Bool>("/wall", 10); // Igaz, ha a porszívó falhoz ér
-        done_pub = node_->create_publisher<std_msgs::msg::Bool>("/done", 10); // Igaz, ha a porszívó befejezte a takarítást
+        cmd_sub = node_->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel", 10,[this](geometry_msgs::msg::Twist::SharedPtr m) { cmd = *m; });
 
-        timer = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&World::tick, this)); // 50 ms-onként tick függvény meghívása
+        pose_pub = node_->create_publisher<geometry_msgs::msg::Pose2D>("/pose", 10);
+        target_pub = node_->create_publisher<geometry_msgs::msg::Point>("/target_dust", 10);
+        wall_pub = node_->create_publisher<std_msgs::msg::Bool>("/wall", 10);
+        done_pub = node_->create_publisher<std_msgs::msg::Bool>("/done", 10);
 
-        show(); // Ablak megjelenítése
+        obstacle_nearby_pub = node_->create_publisher<std_msgs::msg::Bool>("/obstacle_nearby", 10);
+        obstacle_collision_pub = node_->create_publisher<std_msgs::msg::Bool>("/obstacle_collision", 10);
+
+        timer = node_->create_wall_timer(std::chrono::milliseconds(50), std::bind(&World::tick, this));
+
+        show(); // Megjelenítés
     }
 
 protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this); p.fillRect(rect(), QColor(235,235,235)); const double scale = width()/10.0;
-        // cellák
-        for (int i = 0; i < grid_h; i++) for (int j = 0; j < grid_w; j++) {
-            QColor c; bool draw = false;
-            if (grid[i][j] == Cell::Cleaned) {
-                c = QColor(180, 120, 255); draw = true; // lila
-            } else if (grid[i][j] == Cell::Sensed) {
-                c = QColor(255, 240, 140); draw = true; // sárga
-            } else if (grid[i][j] == Cell::Dust) {
-                c = QColor(90, 90, 90); draw = true; // szürke
-            }
+    void paintEvent(QPaintEvent*) override { // Rajzolás
+        QPainter p(this);
+        p.fillRect(rect(), QColor(235, 235, 235));
 
-            if (draw) p.fillRect(QRectF(j * cell_size * scale, i * cell_size * scale, cell_size * scale, cell_size * scale), c); // cella rajzolása
+        const double scale = width() / 10.0;
+
+        // rács kirajzolása
+        for (int i = 0; i < grid_h; ++i) {
+            for (int j = 0; j < grid_w; ++j) {
+
+                QColor c;
+                bool draw = false;
+
+                if (known_dust.count({j, i})) { // ismert kosz
+                    c = QColor(255, 0, 0); // piros
+                    draw = true;
+                }
+                else if (grid[i][j] == Cell::Cleaned) { // felszívott kosz
+                    c = QColor(180, 120, 255); // lila
+                    draw = true;
+                }
+                else if (grid[i][j] == Cell::Sensed) { // érzékelt cella
+                    c = QColor(255, 240, 140); // sárga
+                    draw = true;
+                }
+                else if (grid[i][j] == Cell::Dust) { // kosz
+                    c = QColor(90, 90, 90); // szürke
+                    draw = true;
+                }
+                else if (grid[i][j] == Cell::Obstacle) { // akadály
+                    c = QColor(0, 0, 255); // kék
+                    draw = true;
+                }
+
+                // kirajrolás
+                if (draw) p.fillRect(QRectF(j * cell_size * scale, i * cell_size * scale, cell_size * scale, cell_size * scale), c);
+            }
         }
-        
-        // érzékelési kör (zöld)
+
+        // sense range rajz
         p.setBrush(QColor(0, 255, 0, 60));
-        p.setPen(Qt::NoPen); // nincs keret
+        p.setPen(Qt::NoPen);
         p.drawEllipse(QPointF(pose.x * scale, pose.y * scale), sense_range * scale, sense_range * scale);
-        
-        // porszívó (kék)
+
+        // porszívó
         p.setBrush(Qt::blue);
-        p.setPen(Qt::black); // fekete keret
+        p.setPen(Qt::black);
         p.drawEllipse(QPointF(pose.x * scale, pose.y * scale), 7, 7);
-        
+
         // maradék kosz
-        p.setPen(Qt::black); // fekete szöveg
-        p.setBrush(Qt::NoBrush); // nincs kitöltés
+        p.setPen(Qt::black);
+        p.setBrush(Qt::NoBrush);
         p.drawText(10, 20, QString("Hátralévő kosz: %1").arg(remaining_dust));
     }
 
 private:
     // paraméterek
-    const double sense_range = 2.0; // érzékelési távolság
-    const double cell_size = 0.2; // cella méret
-    const int grid_w = int(10.0 / cell_size); // rács szélesség
-    const int grid_h = int(10.0 / cell_size); // rács magasság
+    const double sense_range = 1.0;
+    const double cell_size = 0.2;
+    const int grid_w = int(10.0 / cell_size);
+    const int grid_h = int(10.0 / cell_size);
 
     // állapot
-    std::vector<std::vector<Cell>> grid; // rács
-    geometry_msgs::msg::Pose2D pose; // porszívó pozíciója
-    geometry_msgs::msg::Twist cmd; // porszívó sebességparancs
-    int remaining_dust{0}; // maradék kosz
-    std::set<std::pair<int,int>> known_dust; // ismert kosz pozíciók (rács koordináták)
+    std::vector<std::vector<Cell>> grid;
+    geometry_msgs::msg::Pose2D pose;
+    geometry_msgs::msg::Twist cmd;
+    int remaining_dust{0};
+    std::set<std::pair<int, int>> known_dust;
 
     // ROS/Qt
     rclcpp::Node::SharedPtr node_;
-    std::mt19937 rand; // véletlen szám
+    std::mt19937 rand;
+
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub;
-    rclcpp::Publisher<geometry_msgs::msg::Pose2D>::SharedPtr pose_pub; // porszívó pozíciója
-    rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr target_pub; // célzott kosz pozíciója
-    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wall_pub; // fal érzékelés
-    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr done_pub; // felszívás kész
+    rclcpp::Publisher<geometry_msgs::msg::Pose2D>::SharedPtr pose_pub;
+    rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr target_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wall_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr done_pub;
+
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr obstacle_nearby_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr obstacle_collision_pub;
+
     rclcpp::TimerBase::SharedPtr timer;
-    
-    // rács inicializálás
-    void init_grid() {
-        grid.assign(grid_h, std::vector<Cell>(grid_w, Cell::Empty)); // minden cella üres
+
+    void init_grid() { // Rács inicializálása
+        grid.assign(grid_h, std::vector<Cell>(grid_w, Cell::Empty));
     }
-    
-    void place_dust() {
-        std::uniform_real_distribution<double> pos(0.6, 9.4); // kosz pozíciók
-        
+
+    void place_dust() { // Koszok elhelyezése
+        std::uniform_real_distribution<double> pos(0.6, 9.4);
+        std::uniform_int_distribution<int> dust_count_dist(1, 100);
+
+        int dust_count = dust_count_dist(rand);
         remaining_dust = 0;
-        for (int i = 0; i < 30; i++) {
+
+        for (int i = 0; i < dust_count; ++i) { // kosz elhelyezs
             int gx = int(pos(rand) / cell_size);
             int gy = int(pos(rand) / cell_size);
-            if (inside(gx, gy) && grid[gy][gx] == Cell::Empty) {
+
+            if (inside(gx, gy) && grid[gy][gx] == Cell::Empty) { // Csak üres cellába kerülhet kosz
                 grid[gy][gx] = Cell::Dust;
-                remaining_dust++;
+                ++remaining_dust;
             }
         }
     }
-    
+
+    void place_obstacles() { // Akadályok elhhelyezése
+        std::uniform_int_distribution<int> count_dist(8, 20); // akadály-csoportok száma
+        std::uniform_int_distribution<int> size_dist(5, 20); // egy csoport mérete (cellák száma)
+        std::uniform_real_distribution<double> prob(0.0, 1.0);
+
+        int obstacle_groups = count_dist(rand); // akadály-csoportok száma
+
+        for (int k = 0; k < obstacle_groups; ++k) { // Akadály-csoport generálás
+
+            int size = size_dist(rand); // csoport mérete
+
+            // minél nagyobb, annál ritkább
+            double p = 0.05 * size;
+            if (prob(rand) < p) continue;
+            
+            // kezdőpont kiválasztása
+            std::uniform_int_distribution<int> gx_dist(0, grid_w - 1);
+            std::uniform_int_distribution<int> gy_dist(0, grid_h - 1);
+
+            int sx = gx_dist(rand);
+            int sy = gy_dist(rand);
+
+            // ha nem üres, kimarad
+            if (!inside(sx, sy) || grid[sy][sx] != Cell::Empty) continue;
+
+            grid[sy][sx] = Cell::Obstacle;
+
+            std::vector<std::pair<int, int>> frontier; // csoport széle
+            frontier.push_back({sx, sy});
+
+            for (int i = 1; i < size; ++i) { // további cellák hozzáadása a csoporthoz
+                if (frontier.empty()) break;
+
+                // véletlen cella kiválasztása a csoport szélei közül
+                std::uniform_int_distribution<int> pick(0, (int)frontier.size() - 1);
+                auto [cx, cy] = frontier[pick(rand)];
+
+                // 8 irány (egy cella szomszédai)
+                std::vector<std::pair<int, int>> neigh = {
+                    {cx + 1, cy}, {cx - 1, cy},
+                    {cx, cy + 1}, {cx, cy - 1},
+                    /*{cx + 1, cy + 1}, {cx + 1, cy - 1},
+                    {cx - 1, cy + 1}, {cx - 1, cy - 1}*/
+                };
+
+                std::shuffle(neigh.begin(), neigh.end(), rand);
+
+                bool placed = false;
+                for (auto [nx, ny] : neigh) { // új akadálycella elhelyezése
+                    if (!inside(nx, ny)) continue;
+                    if (grid[ny][nx] != Cell::Empty) continue;
+                    grid[ny][nx] = Cell::Obstacle;
+                    frontier.push_back({nx, ny});
+                    placed = true;
+                    break;
+                }
+
+                if (!placed) break;
+            }
+        }
+    }
+
+    // DDA line-of-sight – akadály mögé nem lát a sense range
+    bool has_line_of_sight(double x0, double y0, double x1, double y1) const {
+        double dx = x1 - x0;
+        double dy = y1 - y0;
+
+        // lépések száma
+        int steps = (int)(std::max(std::abs(dx), std::abs(dy)) / (cell_size * 0.1));
+        if (steps <= 0) return true;
+
+        // végiglépkedés a vonalon
+        for (int i = 1; i <= steps; ++i) {
+            double t = i / double(steps);
+            double rx = x0 + dx * t;
+            double ry = y0 + dy * t;
+
+            int gx = int(rx / cell_size);
+            int gy = int(ry / cell_size);
+
+            // akadály ellenőrzése
+            if (inside(gx, gy) && grid[gy][gx] == Cell::Obstacle) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // tick
     void tick() {
-        // porszívó mozgása (cmd_vel alapján)
-        pose.x += cmd.linear.x * 0.05 * std::cos(pose.theta); // 50 ms időlépés
-        pose.y += cmd.linear.x * 0.05 * std::sin(pose.theta);
-        pose.theta += cmd.angular.z * 0.05; // szög
-        pose.x = std::clamp(pose.x,0.6,9.4); // határok (ablak szélétől 0.6 távolság)
-        pose.y = std::clamp(pose.y,0.6,9.4);
+        // először kiszámoljuk a következő pozíciót, és megnézzük, akadályba menne-e
+        double step = 0.05;
+        double trial_x = pose.x + cmd.linear.x * step * std::cos(pose.theta);
+        double trial_y = pose.y + cmd.linear.x * step * std::sin(pose.theta);
+        double trial_theta = pose.theta + cmd.angular.z * step; // irány
 
-        // fal érzékelés (ablak széléhez közel)
-        const bool wall = (pose.x <= 0.7 || pose.x >= 9.3 || pose.y <= 0.7 || pose.y >= 9.3); // falhoz érés
+        int gx = int(trial_x / cell_size);
+        int gy = int(trial_y / cell_size);
 
-        // felszívás jelölés
-        mark_cleaned_here();
-        
-        sense_and_update_memory(); // sárgára jelölés és kosz felismerése
-        
-        auto target = choose_target(); // célpont választás
+        // akadály ellenőrzése
+        bool obstacle_hit = false;
+        if (inside(gx, gy) && grid[gy][gx] == Cell::Obstacle) {
+            obstacle_hit = true;
+        }
 
-        // vége?
-        if (remaining_dust == 0) {
+        // fal ellenőrzés
+        bool wall_hit = (trial_x <= 0.5 || trial_x >= 9.5 || trial_y <= 0.5 || trial_y >= 9.5);
+
+        // csak akkor lépünk, nincs se fal, se akadály cella
+        if (!obstacle_hit && !wall_hit) {
+            pose.x = trial_x;
+            pose.y = trial_y;
+            pose.theta = trial_theta;
+        }
+
+        // pozíció korlátozás
+        pose.x = std::clamp(pose.x, 0.6, 9.4);
+        pose.y = std::clamp(pose.y, 0.6, 9.4);
+
+        // falérzékelés
+        const bool wall = (pose.x <= 0.7 || pose.x >= 9.3 || pose.y <= 0.7 || pose.y >= 9.3);
+
+        // felszívás, érzékelés
+        mark_cleaned_here(); // felszívás
+        sense_and_update_memory(); // érzékelés és a memória frissítése
+
+        // célpont választása
+        auto target = choose_target();
+
+        // /obstacle_collision: tényleg nekimenne-e
+        std_msgs::msg::Bool msg;
+        msg.data = obstacle_hit;
+        obstacle_collision_pub->publish(msg);
+
+        // területfelderítés vége? (nincs több Empty cella)
+        bool any_unknown_left = false;
+        for (int i = 0; i < grid_h; ++i) {
+            for (int j = 0; j < grid_w; ++j) {
+                if (grid[i][j] == Cell::Empty) {
+                    any_unknown_left = true;
+                    break;
+                }
+            }
+            if (any_unknown_left) break;
+        }
+
+        if (!any_unknown_left) { // nincs empty -> kész
             std_msgs::msg::Bool done;
-            done.data = true; // minden kosz felszívva
-            done_pub->publish(done); // jelzés a porszívónak
-            timer->cancel(); // időzítő leállítása
-            // GUI marad, logika leáll
+            done.data = true;
+            done_pub->publish(done);
+            timer->cancel();
         }
 
         // publikálás
-        std_msgs::msg::Bool wallmsg; // fal üzenet
-        wallmsg.data = wall; // falhoz érés
-        wall_pub->publish(wallmsg); // fal üzenet küldése
-        pose_pub->publish(pose); // porszívó pozíció küldése
+        std_msgs::msg::Bool w;
+        w.data = wall;
+        wall_pub->publish(w);
 
-        if (target.has_value()) target_pub->publish(target.value()); // célzott kosz pozíció küldése
+        pose_pub->publish(pose);
 
-        update(); // GUI frissítése
+        if (target.has_value())
+            target_pub->publish(target.value());
+
+        update();
     }
 
-    void mark_cleaned_here() {
-        int gx = int(pose.x / cell_size); // porszívó rács koordinátái
+    void mark_cleaned_here() { // felszívás
+        int gx = int(pose.x / cell_size);
         int gy = int(pose.y / cell_size);
-        if (inside(gx, gy)) grid[gy][gx] = Cell::Cleaned; // felszívott kosz jelölése
+        if (inside(gx, gy) && grid[gy][gx] != Cell::Obstacle) {
+            grid[gy][gx] = Cell::Cleaned;
+        }
     }
 
-    void sense_and_update_memory() {
-        for (int i = 0; i < grid_h; i++) {
-            for (int j = 0; j < grid_w; j++) {
-                const double cx = j * cell_size + cell_size / 2, cy = i * cell_size + cell_size / 2; // cella középpontja
-                const double d = std::hypot(cx - pose.x, cy - pose.y); // távolság a porszívótól
-                if (d < sense_range) { // érzékelési tartományban
-                    if (grid[i][j] == Cell::Dust) {
-                        known_dust.insert({j, i}); // felfedeztük -> memóriába
-                        if (d < 0.35) { // közel van -> felszívás
+    void sense_and_update_memory() { // érzékelés és memória frissítése
+        bool obstacle_nearby = false;
+
+        for (int i = 0; i < grid_h; ++i) {
+            for (int j = 0; j < grid_w; ++j) {
+
+                double cx = j * cell_size + cell_size / 2;
+                double cy = i * cell_size + cell_size / 2;
+                double d = std::hypot(cx - pose.x, cy - pose.y);
+
+                if (d < sense_range && has_line_of_sight(pose.x, pose.y, cx, cy)) {
+                    // van akadály a közelben?
+                    if (grid[i][j] == Cell::Obstacle && d < 0.8) {
+                        obstacle_nearby = true;
+                    }
+
+                    if (grid[i][j] == Cell::Dust) { // kosz?
+                        known_dust.insert({j, i});
+                        if (d < 0.35) {
                             grid[i][j] = Cell::Cleaned;
-                            if (known_dust.count({j, i})) known_dust.erase({j, i}); // eltávolítás a memóriából
+                            known_dust.erase({j, i});
                             remaining_dust = std::max(0, remaining_dust - 1);
                         }
-                    } else if (grid[i][j] == Cell::Empty) { // üres cella
-                        grid[i][j] = Cell::Sensed; // sárgára színezés
+                    }
+                    else if (grid[i][j] == Cell::Empty) {
+                        grid[i][j] = Cell::Sensed;
                     }
                 }
             }
         }
+
+        // /obstacle_nearby - akadály a közelben
+        std_msgs::msg::Bool msg;
+        msg.data = obstacle_nearby;
+        obstacle_nearby_pub->publish(msg);
     }
 
-    std::optional<geometry_msgs::msg::Point> choose_target() {
-        // 1) Van ismert kosz a memóriában -> Legközelebbi kiválasztása
-        std::vector<std::pair<double, geometry_msgs::msg::Point>> candidates; // (távolság, pont) párok
-        double best = 1e9; // legkisebb távolság
-        for (auto [jx, iy] : known_dust) { // memóriában lévő koszok
-            if (!inside(jx, iy)) continue; // érvényes koordináta
-            if (grid[iy][jx] != Cell::Dust) continue; // még kosz-e?
+    std::optional<geometry_msgs::msg::Point> choose_target() { // célpont választása
+        std::optional<geometry_msgs::msg::Point> result;
+        double best = 1e9; // legnagyobb távolság
 
-            double cx = jx * cell_size + cell_size / 2; // cella középpontja
+        // 1) Előbb az ismert koszok közül a legközelebbit szívjuk fel
+        for (auto [jx, iy] : known_dust) {
+            if (!inside(jx, iy)) continue;
+            if (grid[iy][jx] != Cell::Dust) continue;
+
+            double cx = jx * cell_size + cell_size / 2;
             double cy = iy * cell_size + cell_size / 2;
+            double d = std::hypot(cx - pose.x, cy - pose.y);
 
-            double d = std::hypot(cx - pose.x, cy - pose.y); // távolság a porszívótól
-
-            if (d < best - 1e-6) { // új legjobb
-                best = d; // legkisebb távolság frissítése
-                candidates.clear();
-                geometry_msgs::msg::Point pt; // pont létrehozása
-                pt.x = cx;
-                pt.y = cy;
-                pt.z = 0.0;
-                candidates.push_back({d, pt}); // hozzáadás a jelöltekhez
-            } else if (std::abs(d - best) < 0.05) { // közel azonos távolságú koszok
-                geometry_msgs::msg::Point pt;
-                pt.x = cx;
-                pt.y = cy;
-                pt.z = 0.0;
-                candidates.push_back({d, pt}); // hozzáadás a jelöltekhez
+            if (d < best) {
+                best = d;
+                geometry_msgs::msg::Point p;
+                p.x = cx; p.y = cy; p.z = 0.0;
+                result = p;
             }
         }
-        if (!candidates.empty()) { // több jelölt esetén véletlenszerű választás
-            std::uniform_int_distribution<int> pick(0, candidates.size() - 1);
-            return candidates[pick(rand)].second;
-        }
+        if (result) return result;
 
-        // 2) Nincs ismert kosz -> Felfedezés: legközelebbi ismeretlen cella
-        double frontier_best = 1e9;
-        geometry_msgs::msg::Point pt;
-        bool ok = false;
-        for (int i = 0; i < grid_h; i++) {
-            for (int j = 0; j < grid_w; j++) {
+        // 2) nincs ismert kosz -> legközelebbi Empty cella (frontier/ismert terület széle)
+        best = 1e9;
+        for (int i = 0; i < grid_h; ++i) {
+            for (int j = 0; j < grid_w; ++j) {
                 if (grid[i][j] == Cell::Empty) {
-                    double cx = j * cell_size + cell_size / 2;
+                    double cx = j * cell_size + cell_size / 2; // cella közepe
                     double cy = i * cell_size + cell_size / 2;
-                    double d = std::hypot(cx - pose.x, cy - pose.y);
-                    if (d < frontier_best) { // új legjobb felfedezési célpont
-                        frontier_best = d;
-                        pt.x = cx;
-                        pt.y = cy;
-                        pt.z = 0.0;
-                        ok = true;
+                    double d = std::hypot(cx - pose.x, cy - pose.y); // táv
+                    if (d < best) { // legközelebbi
+                        best = d;
+                        geometry_msgs::msg::Point p;
+                        p.x = cx; p.y = cy; p.z = 0.0;
+                        result = p;
                     }
                 }
             }
         }
-
-        if (ok) return pt; // van felfedezési célpont
-        return std::nullopt;
+        return result;
     }
 
-    bool inside(int x, int y) const {
+    bool inside(int x, int y) const{ // rácson határán belül?
         return x >= 0 && y >= 0 && x < grid_w && y < grid_h;
     }
 };
 
 int main(int argc, char** argv) {
-    rclcpp::init(argc, argv); // ROS inicializálás
-    QApplication app(argc, argv); // Qt inicializálás
-    auto node = std::make_shared<rclcpp::Node>("world_node"); // ROS csomópont létrehozása
+    rclcpp::init(argc, argv);
+    QApplication app(argc, argv);
 
+    auto node = std::make_shared<rclcpp::Node>("world_node");
     World w(node);
 
-    std::thread spin_thread([&]() {
+    std::thread spin_thread([&]() { // ROS eseménykezelő ciklus külön szálon
         rclcpp::spin(node);
     });
 
-    const int ret = app.exec(); // Qt ciklus
-
-    rclcpp::shutdown(); // ROS leállítás
-
+    int ret = app.exec(); // Qt eseménykezelő ciklus
+    rclcpp::shutdown();
     spin_thread.join();
     return ret;
 }
